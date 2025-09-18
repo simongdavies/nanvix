@@ -1,0 +1,6 @@
+target
+images
+logs
+.git
+src
+sysroot-debug/src
