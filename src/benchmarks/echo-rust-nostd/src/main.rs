@@ -47,6 +47,11 @@ pub fn main() -> Result<(), Error> {
             Ok(n) => n as c_ssize_t,
         };
 
+        // Convert the buffer to uppercase string
+        for byte in buffer.iter_mut().take(nread as usize) {
+            *byte = byte.to_ascii_uppercase();
+        }
+
         unistd::write(stdout, &buffer[..nread as usize])?;
     }
 

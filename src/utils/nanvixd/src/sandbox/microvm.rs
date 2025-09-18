@@ -49,6 +49,7 @@ impl Microvm {
         stderr: Option<&str>,
         hwloc: Option<HwLoc>,
         binary_directory: &str,
+        log_directory: &str,
         control_plane_listener: &mut SocketListener,
         control_plane_poll: &mut Poll,
         l2: bool,
@@ -56,6 +57,8 @@ impl Microvm {
         let mut user_vm_args: Vec<String> = vec![
             format!("{}/microvm.elf", binary_directory),
             ::microvm::args::Args::OPT_LOGFILE.to_string(),
+            ::microvm::args::Args::OPT_LOGDIR.to_string(),
+            log_directory.to_string(),
             ::microvm::args::Args::OPT_USER_VM_ID.to_string(),
             id.to_string(),
             ::microvm::args::Args::OPT_KERNEL.to_string(),

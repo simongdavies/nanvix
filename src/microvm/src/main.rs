@@ -88,7 +88,7 @@ fn main() -> Result<ExitCode> {
     };
 
     // Initialize logger. If this fails, the program will panic.
-    logging::initialize(args.log_to_file());
+    logging::initialize(args.log_to_file(), args.log_directory());
 
     let gateway: Option<Gateway> = match &system_vm_addr {
         Some(addr) => loop {

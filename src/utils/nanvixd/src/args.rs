@@ -23,6 +23,8 @@ pub struct Args {
     tmp_directory: String,
     binary_directory: String,
     toolchain_binary_directory: String,
+    log_to_file: bool,
+    log_directory: String,
     console_file: Option<String>,
     hwloc: Option<HwLoc>,
     /// Whether linuxd must be deployed in an L2 VM or not.
@@ -40,6 +42,8 @@ impl Args {
     pub const OPT_BIN_DIRECTORY: &'static str = "-bin-dir";
     pub const OPT_TOOLCHAIN_BIN_DIRECTORY: &'static str = "-toolchain-bin-dir";
     pub const OPT_CONSOLE_FILE: &'static str = "-console-file";
+    pub const OPT_LOG_TO_FILE: &'static str = "-log-to-file";
+    pub const OPT_LOG_DIRECTORY: &'static str = "-log-dir";
     pub const OPT_HWLOC: &'static str = "-hwloc";
     pub const OPT_L2: &'static str = "-l2";
 
@@ -49,6 +53,8 @@ impl Args {
         let mut binary_directory: String = config::DEFAULT_BIN_DIRECTORY.to_string();
         let mut toolchain_binary_directory: String =
             config::DEFAULT_TOOLCHAIN_BIN_DIRECTORY.to_string();
+        let mut log_to_file: bool = false;
+        let mut log_directory: String = config::DEFAULT_LOG_DIRECTORY.to_string();
         let mut console_file: Option<String> = None;
         let mut hwloc: Option<HwLoc> = None;
         let mut l2: bool = false;
@@ -92,6 +98,13 @@ impl Args {
                     let hwloc_reader = BufReader::new(hwloc_file);
                     hwloc = Some(serde_json::from_reader(hwloc_reader)?);
                 },
+                Self::OPT_LOG_TO_FILE => {
+                    log_to_file = true;
+                },
+                Self::OPT_LOG_DIRECTORY => {
+                    i += 1;
+                    log_directory = args[i].clone();
+                },
                 Self::OPT_L2 => {
                     l2 = true;
                 },
@@ -108,6 +121,8 @@ impl Args {
             tmp_directory,
             binary_directory,
             toolchain_binary_directory,
+            log_to_file,
+            log_directory,
             console_file,
             hwloc,
             l2,
@@ -151,6 +166,14 @@ impl Args {
 
     pub fn hwloc(&self) -> Option<HwLoc> {
         self.hwloc.clone()
+    }
+
+    pub fn log_to_file(&self) -> bool {
+        self.log_to_file
+    }
+
+    pub fn log_directory(&self) -> &str {
+        &self.log_directory
     }
 
     pub fn l2(&self) -> bool {

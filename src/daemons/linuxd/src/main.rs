@@ -88,7 +88,7 @@ const DEFAULT_GATEWAY_SOCKET_TYPE: SocketType = SocketType::Unix;
 pub fn main() -> Result<()> {
     // Parse and retrieve command-line arguments.
     let args: Args = args::Args::parse(env::args().collect())?;
-    initialize(args.log_to_file());
+    initialize(args.log_to_file(), args.log_file_dir());
 
     // Work-out the socket addresses.
     let control_plane_sockaddr: String = args.control_plane_sockaddr();
@@ -192,14 +192,14 @@ pub fn main() -> Result<()> {
 ///
 /// If the logger cannot be initialized, the function will panic.
 ///
-pub fn initialize(logfile: bool) {
+pub fn initialize(logfile: bool, log_dir: String) {
     static INIT_LOG: Once = Once::new();
     INIT_LOG.call_once(|| {
         let logger =
             Logger::try_with_env_or_str("error").expect("malformed RUST_LOG environment variable");
         if logfile {
             logger
-                .log_to_file(FileSpec::default())
+                .log_to_file(FileSpec::default().directory(log_dir))
                 .start()
                 .expect("failed to initialize logger");
         } else {

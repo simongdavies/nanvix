@@ -118,6 +118,7 @@ impl HttpClient {
             args.hwloc().clone(),
             args.binary_directory(),
             args.toolchain_binary_directory(),
+            args.log_directory(),
             args.l2(),
         );
 
