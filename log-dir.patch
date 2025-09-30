@@ -1,0 +1,664 @@
+From 52e55e0564c0129a3dbea7f3beae008a858bd3ad Mon Sep 17 00:00:00 2001
+From: Simon Davies <simongdavies@users.noreply.github.com>
+Date: Thu, 18 Sep 2025 21:11:00 +0100
+Subject: [PATCH] [daemons] E: Add log dir
+
+Signed-off-by: Simon Davies <simongdavies@users.noreply.github.com>
+---
+ src/benchmarks/echo-rust-nostd/src/main.rs |  5 ++
+ src/daemons/linuxd/src/args.rs             | 75 +++++++++++++++++++++-
+ src/daemons/linuxd/src/main.rs             |  6 +-
+ src/microvm/src/args.rs                    | 71 +++++++++++++++++++-
+ src/microvm/src/logging.rs                 |  7 +-
+ src/microvm/src/main.rs                    |  2 +-
+ src/utils/nanvixd/src/args.rs              | 23 +++++++
+ src/utils/nanvixd/src/cache/mod.rs         |  2 +
+ src/utils/nanvixd/src/config.rs            |  7 ++
+ src/utils/nanvixd/src/http.rs              |  1 +
+ src/utils/nanvixd/src/logging.rs           | 21 ++++--
+ src/utils/nanvixd/src/main.rs              |  4 +-
+ src/utils/nanvixd/src/sandbox/config.rs    | 15 +++++
+ src/utils/nanvixd/src/sandbox/linuxd.rs    |  3 +
+ src/utils/nanvixd/src/sandbox/microvm.rs   |  3 +
+ 15 files changed, 227 insertions(+), 18 deletions(-)
+
+diff --git a/src/benchmarks/echo-rust-nostd/src/main.rs b/src/benchmarks/echo-rust-nostd/src/main.rs
+index 630ac984..2c8a8f3d 100644
+--- a/src/benchmarks/echo-rust-nostd/src/main.rs
++++ b/src/benchmarks/echo-rust-nostd/src/main.rs
+@@ -47,6 +47,11 @@ pub fn main() -> Result<(), Error> {
+             Ok(n) => n as c_ssize_t,
+         };
+ 
++        // Convert the buffer to uppercase string
++        for byte in buffer.iter_mut().take(nread as usize) {
++            *byte = byte.to_ascii_uppercase();
++        }
++
+         unistd::write(stdout, &buffer[..nread as usize])?;
+     }
+ 
+diff --git a/src/daemons/linuxd/src/args.rs b/src/daemons/linuxd/src/args.rs
+index 74ba6888..67fff660 100644
+--- a/src/daemons/linuxd/src/args.rs
++++ b/src/daemons/linuxd/src/args.rs
+@@ -31,6 +31,8 @@ pub struct Args {
+     gateway_bind_sockaddr_type: Option<String>,
+     /// Log to file?
+     log_to_file: bool,
++    /// Log file directory.
++    log_directory: String,
+     /// Deployed in an L2 VM?
+     l2: bool,
+ }
+@@ -56,6 +58,8 @@ impl Args {
+     pub const OPT_GATEWAY_BIND_SOCKET_TYPE: &'static str = "-gateway-bind-socket-type";
+     /// Command-line option for log redirecting.
+     pub const OPT_LOGFILE: &'static str = "-log-to-file";
++    /// Command-line option for setting the log file directory.
++    pub const OPT_LOGDIR: &'static str = "-log-dir";
+     /// Command-line option for signaling deployment in an L2 VM.
+     pub const OPT_L2: &'static str = "-l2";
+ 
+@@ -89,6 +93,7 @@ impl Args {
+         let mut user_vm_bind_sockaddr_type: Option<String> = None;
+         let mut gateway_bind_sockaddr: Option<String> = None;
+         let mut gateway_bind_sockaddr_type: Option<String> = None;
++        let mut log_directory: Option<String> = None;
+         let mut log_to_file: bool = false;
+         let mut l2: bool = false;
+ 
+@@ -126,6 +131,10 @@ impl Args {
+                 Self::OPT_LOGFILE => {
+                     log_to_file = true;
+                 },
++                Self::OPT_LOGDIR => {
++                    i += 1;
++                    log_directory = Some(args[i].clone());
++                },
+                 Self::OPT_L2 => {
+                     l2 = true;
+                 },
+@@ -147,6 +156,51 @@ impl Args {
+             return Err(anyhow::anyhow!("user VM bind socket address not set"));
+         }
+ 
++        // Check if log file directory was set if logging to file is enabled. Set the default directory if not.
++        let log_directory: String = match (log_to_file, log_directory) {
++            (true, Some(path)) => path,
++            // default to log dir relative to the CWD, make the directory path absolute
++            (true, None) => {
++                let mut abs_path = std::env::current_dir().map_err(|e| {
++                    anyhow::anyhow!("failed to get current directory (error={:?})", e)
++                })?;
++                abs_path.push("log");
++                abs_path.to_str().map(|s| s.to_string()).ok_or_else(|| {
++                    anyhow::anyhow!("failed to convert log directory path to string")
++                })?
++            },
++            (false, _) => String::new(),
++        };
++
++        // Validate that the path to the log file exists if logging to file is enabled.
++        // If it does not exist, try to create it.
++        if log_to_file {
++            let path = std::path::Path::new(&log_directory);
++            if !path.exists() {
++                std::fs::create_dir_all(path).map_err(|e| {
++                    anyhow::anyhow!(
++                        "failed to create log file directory (path={}, error={:?})",
++                        path.display(),
++                        e
++                    )
++                })?;
++            }
++            // check if we can create and write a file in the directory
++            let test_file_path = path.join("test.log");
++            match std::fs::File::create(&test_file_path) {
++                Ok(_) => {
++                    std::fs::remove_file(&test_file_path).ok(); // clean up the test file
++                },
++                Err(e) => {
++                    return Err(anyhow::anyhow!(
++                        "failed to create log file (path={}, error={:?})",
++                        test_file_path.display(),
++                        e
++                    ));
++                },
++            }
++        }
++
+         Ok(Self {
+             control_plane_sockaddr,
+             control_plane_sockaddr_type,
+@@ -155,6 +209,7 @@ impl Args {
+             gateway_bind_sockaddr,
+             gateway_bind_sockaddr_type,
+             log_to_file,
++            log_directory,
+             l2,
+         })
+     }
+@@ -171,7 +226,8 @@ impl Args {
+     pub fn usage(program_name: &str) {
+         println!(
+             "Usage: {} {} {} <control-plane-sockaddr> {} <control-plane-socktype> {} \
+-             <user-vm-sockaddr> {} <user-vm-socktype> {} <gateway-sockaddr> {} <gateway-socktype>",
++             <user-vm-sockaddr> {} <user-vm-socktype> {} <gateway-sockaddr> {} <gateway-socktype> \
++             {} <log-to-file> {} <log-file-dir> {} <l2>",
+             program_name,
+             Self::OPT_LOGFILE,
+             Self::OPT_CONTROL_PLANE_SOCKADDR,
+@@ -179,7 +235,10 @@ impl Args {
+             Self::OPT_USER_VM_BIND_SOCKADDR,
+             Self::OPT_USER_VM_BIND_SOCKET_TYPE,
+             Self::OPT_GATEWAY_BIND_SOCKADDR,
+-            Self::OPT_GATEWAY_BIND_SOCKET_TYPE
++            Self::OPT_GATEWAY_BIND_SOCKET_TYPE,
++            Self::OPT_LOGFILE,
++            Self::OPT_LOGDIR,
++            Self::OPT_L2
+         );
+     }
+ 
+@@ -274,6 +333,18 @@ impl Args {
+         self.log_to_file
+     }
+ 
++    ///
++    /// # Description
++    ///
++    /// Returns the log file directory.
++    /// # Returns
++    ///
++    /// The log file directory.
++    ///
++    pub fn log_file_dir(&self) -> String {
++        self.log_directory.clone()
++    }
++
+     ///
+     /// # Description
+     ///
+diff --git a/src/daemons/linuxd/src/main.rs b/src/daemons/linuxd/src/main.rs
+index a89a2013..f2329d1b 100644
+--- a/src/daemons/linuxd/src/main.rs
++++ b/src/daemons/linuxd/src/main.rs
+@@ -88,7 +88,7 @@ const DEFAULT_GATEWAY_SOCKET_TYPE: SocketType = SocketType::Unix;
+ pub fn main() -> Result<()> {
+     // Parse and retrieve command-line arguments.
+     let args: Args = args::Args::parse(env::args().collect())?;
+-    initialize(args.log_to_file());
++    initialize(args.log_to_file(), args.log_file_dir());
+ 
+     // Work-out the socket addresses.
+     let control_plane_sockaddr: String = args.control_plane_sockaddr();
+@@ -192,14 +192,14 @@ pub fn main() -> Result<()> {
+ ///
+ /// If the logger cannot be initialized, the function will panic.
+ ///
+-pub fn initialize(logfile: bool) {
++pub fn initialize(logfile: bool, log_dir: String) {
+     static INIT_LOG: Once = Once::new();
+     INIT_LOG.call_once(|| {
+         let logger =
+             Logger::try_with_env_or_str("error").expect("malformed RUST_LOG environment variable");
+         if logfile {
+             logger
+-                .log_to_file(FileSpec::default())
++                .log_to_file(FileSpec::default().directory(log_dir))
+                 .start()
+                 .expect("failed to initialize logger");
+         } else {
+diff --git a/src/microvm/src/args.rs b/src/microvm/src/args.rs
+index 15936c80..b7d97357 100644
+--- a/src/microvm/src/args.rs
++++ b/src/microvm/src/args.rs
+@@ -53,6 +53,8 @@ pub struct Args {
+     control_plane_socket_type: Option<SocketType>,
+     /// Log to file?
+     log_to_file: bool,
++    /// log_dir
++    log_directory: String,
+ }
+ 
+ //==================================================================================================
+@@ -84,6 +86,8 @@ impl Args {
+     pub const OPT_INITRD_ARGS: &'static str = "-initrd_args";
+     /// Log to file.
+     pub const OPT_LOGFILE: &'static str = "-log-to-file";
++    /// Log directory
++    pub const OPT_LOGDIR: &'static str = "-log-dir";
+ 
+     ///
+     /// # Description
+@@ -107,6 +111,7 @@ impl Args {
+         let mut control_plane_addr: Option<String> = None;
+         let mut control_plane_socket_type: Option<SocketType> = None;
+         let mut log_to_file: bool = false;
++        let mut log_directory: Option<String> = None;
+ 
+         // Parse command-line arguments.
+         let mut i: usize = 1;
+@@ -211,6 +216,11 @@ impl Args {
+                 Self::OPT_LOGFILE => {
+                     log_to_file = true;
+                 },
++                // Set log directory
++                Self::OPT_LOGDIR if i + 1 < args.len() => {
++                    log_directory = Some(args[i + 1].clone());
++                    i += 1;
++                },
+                 // Invalid argument.
+                 _ => {
+                     Self::usage();
+@@ -241,6 +251,51 @@ impl Args {
+             anyhow::bail!("invalid memory size");
+         }
+ 
++        // Check if log file directory was set if logging to file is enabled. Set the default directory if not.
++        let log_directory: String = match (log_to_file, log_directory) {
++            (true, Some(path)) => path,
++            // default to log dir relative to the CWD, make the directory path absolute
++            (true, None) => {
++                let mut abs_path = std::env::current_dir().map_err(|e| {
++                    anyhow::anyhow!("failed to get current directory (error={:?})", e)
++                })?;
++                abs_path.push("log");
++                abs_path.to_str().map(|s| s.to_string()).ok_or_else(|| {
++                    anyhow::anyhow!("failed to convert log directory path to string")
++                })?
++            },
++            (false, _) => String::new(),
++        };
++
++        // Validate that the path to the log file exists if logging to file is enabled.
++        // If it does not exist, try to create it.
++        if log_to_file {
++            let path = std::path::Path::new(&log_directory);
++            if !path.exists() {
++                std::fs::create_dir_all(path).map_err(|e| {
++                    anyhow::anyhow!(
++                        "failed to create log file directory (path={}, error={:?})",
++                        path.display(),
++                        e
++                    )
++                })?;
++            }
++            // check if we can create and write a file in the directory
++            let test_file_path = path.join("test.log");
++            match std::fs::File::create(&test_file_path) {
++                Ok(_) => {
++                    std::fs::remove_file(&test_file_path).ok(); // clean up the test file
++                },
++                Err(e) => {
++                    return Err(anyhow::anyhow!(
++                        "failed to create log file (path={}, error={:?})",
++                        test_file_path.display(),
++                        e
++                    ));
++                },
++            }
++        }
++
+         Ok(Self {
+             user_vm_id,
+             kernel_filename,
+@@ -253,6 +308,7 @@ impl Args {
+             control_plane_addr,
+             control_plane_socket_type,
+             log_to_file,
++            log_directory,
+         })
+     }
+ 
+@@ -264,7 +320,7 @@ impl Args {
+     pub fn usage() {
+         eprintln!(
+             "Usage: {} {} <id> {} <kernel> [{} <size>] [{} <file>] [{} <file>]  [{} \
+-             <socket-address>] [{}] [{} <args>]",
++             <socket-address>] [{}] [{} <args>] [{} <dir>]",
+             env::args().next().unwrap_or("microvm".to_string()),
+             Self::OPT_USER_VM_ID,
+             Self::OPT_KERNEL,
+@@ -274,6 +330,7 @@ impl Args {
+             Self::OPT_SYSTEM_VM_SOCKADDR,
+             Self::OPT_LOGFILE,
+             Self::OPT_INITRD_ARGS,
++            Self::OPT_LOGDIR,
+         );
+     }
+ 
+@@ -427,4 +484,16 @@ impl Args {
+     pub fn log_to_file(&self) -> bool {
+         self.log_to_file
+     }
++    ///
++    /// # Description
++    ///
++    /// Returns the log directory.
++    ///
++    /// # Returns
++    ///
++    /// The log directory.
++    ///
++    pub fn log_directory(&self) -> String {
++        self.log_directory.clone()
++    }
+ }
+diff --git a/src/microvm/src/logging.rs b/src/microvm/src/logging.rs
+index 5d7430c6..6fcb8840 100644
+--- a/src/microvm/src/logging.rs
++++ b/src/microvm/src/logging.rs
+@@ -29,19 +29,20 @@ use ::std::sync::Once;
+ /// # Parameters
+ ///
+ /// - `log_to_file`: Log to file?
++/// - `log_dir`: Log file directory
+ ///
+ /// # Note
+ ///
+ /// If the logger cannot be initialized, the function will panic.
+ ///
+-pub fn initialize(log_to_file: bool) {
++pub fn initialize(logfile: bool, log_dir: String) {
+     static INIT_LOG: Once = Once::new();
+     INIT_LOG.call_once(|| {
+         let logger =
+             Logger::try_with_env_or_str("error").expect("malformed RUST_LOG environment variable");
+-        if log_to_file {
++        if logfile {
+             logger
+-                .log_to_file(FileSpec::default())
++                .log_to_file(FileSpec::default().directory(log_dir))
+                 .start()
+                 .expect("failed to initialize logger");
+         } else {
+diff --git a/src/microvm/src/main.rs b/src/microvm/src/main.rs
+index 7dc4ae07..bb831c79 100644
+--- a/src/microvm/src/main.rs
++++ b/src/microvm/src/main.rs
+@@ -88,7 +88,7 @@ fn main() -> Result<ExitCode> {
+     };
+ 
+     // Initialize logger. If this fails, the program will panic.
+-    logging::initialize(args.log_to_file());
++    logging::initialize(args.log_to_file(), args.log_directory());
+ 
+     let gateway: Option<Gateway> = match &system_vm_addr {
+         Some(addr) => loop {
+diff --git a/src/utils/nanvixd/src/args.rs b/src/utils/nanvixd/src/args.rs
+index 9f428edb..a0775efa 100644
+--- a/src/utils/nanvixd/src/args.rs
++++ b/src/utils/nanvixd/src/args.rs
+@@ -23,6 +23,8 @@ pub struct Args {
+     tmp_directory: String,
+     binary_directory: String,
+     toolchain_binary_directory: String,
++    log_to_file: bool,
++    log_directory: String,
+     console_file: Option<String>,
+     hwloc: Option<HwLoc>,
+     /// Whether linuxd must be deployed in an L2 VM or not.
+@@ -40,6 +42,8 @@ impl Args {
+     pub const OPT_BIN_DIRECTORY: &'static str = "-bin-dir";
+     pub const OPT_TOOLCHAIN_BIN_DIRECTORY: &'static str = "-toolchain-bin-dir";
+     pub const OPT_CONSOLE_FILE: &'static str = "-console-file";
++    pub const OPT_LOG_TO_FILE: &'static str = "-log-to-file";
++    pub const OPT_LOG_DIRECTORY: &'static str = "-log-dir";
+     pub const OPT_HWLOC: &'static str = "-hwloc";
+     pub const OPT_L2: &'static str = "-l2";
+ 
+@@ -49,6 +53,8 @@ impl Args {
+         let mut binary_directory: String = config::DEFAULT_BIN_DIRECTORY.to_string();
+         let mut toolchain_binary_directory: String =
+             config::DEFAULT_TOOLCHAIN_BIN_DIRECTORY.to_string();
++        let mut log_to_file: bool = false;
++        let mut log_directory: String = config::DEFAULT_LOG_DIRECTORY.to_string();
+         let mut console_file: Option<String> = None;
+         let mut hwloc: Option<HwLoc> = None;
+         let mut l2: bool = false;
+@@ -92,6 +98,13 @@ impl Args {
+                     let hwloc_reader = BufReader::new(hwloc_file);
+                     hwloc = Some(serde_json::from_reader(hwloc_reader)?);
+                 },
++                Self::OPT_LOG_TO_FILE => {
++                    log_to_file = true;
++                },
++                Self::OPT_LOG_DIRECTORY => {
++                    i += 1;
++                    log_directory = args[i].clone();
++                },
+                 Self::OPT_L2 => {
+                     l2 = true;
+                 },
+@@ -108,6 +121,8 @@ impl Args {
+             tmp_directory,
+             binary_directory,
+             toolchain_binary_directory,
++            log_to_file,
++            log_directory,
+             console_file,
+             hwloc,
+             l2,
+@@ -153,6 +168,14 @@ impl Args {
+         self.hwloc.clone()
+     }
+ 
++    pub fn log_to_file(&self) -> bool {
++        self.log_to_file
++    }
++
++    pub fn log_directory(&self) -> &str {
++        &self.log_directory
++    }
++
+     pub fn l2(&self) -> bool {
+         self.l2
+     }
+diff --git a/src/utils/nanvixd/src/cache/mod.rs b/src/utils/nanvixd/src/cache/mod.rs
+index 42986fa5..ba10bfe7 100644
+--- a/src/utils/nanvixd/src/cache/mod.rs
++++ b/src/utils/nanvixd/src/cache/mod.rs
+@@ -184,6 +184,7 @@ impl SandboxCache {
+                             sandbox_config.hwloc(),
+                             sandbox_config.binary_directory(),
+                             sandbox_config.toolchain_binary_directory(),
++                            sandbox_config.log_directory(),
+                             control_plane_listener,
+                             control_plane_poll,
+                             sandbox_config.l2(),
+@@ -204,6 +205,7 @@ impl SandboxCache {
+                         sandbox_config.console_file(),
+                         sandbox_config.hwloc(),
+                         sandbox_config.binary_directory(),
++                        sandbox_config.log_directory(),
+                         control_plane_listener,
+                         control_plane_poll,
+                         sandbox_config.l2(),
+diff --git a/src/utils/nanvixd/src/config.rs b/src/utils/nanvixd/src/config.rs
+index 246e01ca..ad0937b6 100644
+--- a/src/utils/nanvixd/src/config.rs
++++ b/src/utils/nanvixd/src/config.rs
+@@ -31,6 +31,13 @@ pub const DEFAULT_BIN_DIRECTORY: &str = "./bin";
+ ///
+ pub const DEFAULT_TOOLCHAIN_BIN_DIRECTORY: &str = "./toolchain/bin";
+ 
++///
++/// # Description
++///
++/// Default directory for logs
++///
++pub const DEFAULT_LOG_DIRECTORY: &str = "./logs";
++
+ /// Suffix for Unix sockets.
+ #[cfg(debug_assertions)]
+ const UNIX_SOCKET_SUFFIX: &str = ".debug.socket";
+diff --git a/src/utils/nanvixd/src/http.rs b/src/utils/nanvixd/src/http.rs
+index 9caee1e7..75e82655 100644
+--- a/src/utils/nanvixd/src/http.rs
++++ b/src/utils/nanvixd/src/http.rs
+@@ -118,6 +118,7 @@ impl HttpClient {
+             args.hwloc().clone(),
+             args.binary_directory(),
+             args.toolchain_binary_directory(),
++            args.log_directory(),
+             args.l2(),
+         );
+ 
+diff --git a/src/utils/nanvixd/src/logging.rs b/src/utils/nanvixd/src/logging.rs
+index 3b8954c5..a4c7f852 100644
+--- a/src/utils/nanvixd/src/logging.rs
++++ b/src/utils/nanvixd/src/logging.rs
+@@ -5,7 +5,10 @@
+ // Imports
+ //==================================================================================================
+ 
+-use ::flexi_logger::Logger;
++use ::flexi_logger::{
++    FileSpec,
++    Logger,
++};
+ use ::std::sync::Once;
+ 
+ //==================================================================================================
+@@ -22,12 +25,18 @@ use ::std::sync::Once;
+ /// If the logger cannot be initialized, the function will panic.
+ ///
+ #[allow(clippy::expect_used)]
+-pub fn initialize() {
++pub fn initialize(logfile: bool, log_dir: &str) {
+     static INIT_LOG: Once = Once::new();
+     INIT_LOG.call_once(|| {
+-        Logger::try_with_env_or_str("error")
+-            .expect("malformed RUST_LOG environment variable")
+-            .start()
+-            .expect("failed to initialize logger");
++        let logger =
++            Logger::try_with_env_or_str("error").expect("malformed RUST_LOG environment variable");
++        if logfile {
++            logger
++                .log_to_file(FileSpec::default().directory(log_dir))
++                .start()
++                .expect("failed to initialize logger");
++        } else {
++            logger.start().expect("failed to initialize logger");
++        }
+     });
+ }
+diff --git a/src/utils/nanvixd/src/main.rs b/src/utils/nanvixd/src/main.rs
+index 9f2104ea..a0683650 100644
+--- a/src/utils/nanvixd/src/main.rs
++++ b/src/utils/nanvixd/src/main.rs
+@@ -55,10 +55,10 @@ use ::tokio::{
+ 
+ #[tokio::main]
+ pub async fn main() -> Result<()> {
+-    logging::initialize();
+-
+     let args: Args = Args::parse(std::env::args().collect())?;
+ 
++    logging::initialize(args.log_to_file(), args.log_directory());
++
+     let mut signals: Signal = signal(SignalKind::interrupt())?;
+     let http_listener: TcpListener = TcpListener::bind(args.http_sockaddr()).await?;
+     let sandbox_cache: Arc<Mutex<SandboxCache>> = SandboxCache::new();
+diff --git a/src/utils/nanvixd/src/sandbox/config.rs b/src/utils/nanvixd/src/sandbox/config.rs
+index 96ce244f..607be178 100644
+--- a/src/utils/nanvixd/src/sandbox/config.rs
++++ b/src/utils/nanvixd/src/sandbox/config.rs
+@@ -28,6 +28,8 @@ pub struct SandboxConfig {
+     binary_directory: String,
+     /// Path to the toolchain binary directory.
+     toolchain_binary_directory: String,
++    /// Directory for log files.
++    log_directory: String,
+     /// Flag to deploy linuxd in an L2 VM.
+     l2: bool,
+ }
+@@ -53,6 +55,7 @@ impl SandboxConfig {
+     /// - `hwloc`: Hardware locality configuration.
+     /// - `binary_directory`: Path to the binary directory.
+     /// - `toolchain_binary_directory`: Path to the toolchain binary directory.
++    /// - `log_directory`: Path to the log directory.
+     /// - `l2`: Flag to deploy linuxd in an L2 VM.
+     ///
+     /// # Returns
+@@ -70,6 +73,7 @@ impl SandboxConfig {
+         hwloc: Option<HwLoc>,
+         binary_directory: &str,
+         toolchain_binary_directory: &str,
++        log_directory: &str,
+         l2: bool,
+     ) -> Self {
+         Self {
+@@ -82,6 +86,7 @@ impl SandboxConfig {
+             hwloc,
+             binary_directory: binary_directory.to_string(),
+             toolchain_binary_directory: toolchain_binary_directory.to_string(),
++            log_directory: log_directory.to_string(),
+             l2,
+         }
+     }
+@@ -203,6 +208,16 @@ impl SandboxConfig {
+         &self.toolchain_binary_directory
+     }
+ 
++    /// Returns the log directory.
++    ///
++    /// # Returns
++    ///
++    /// The path to the log directory.
++    ///
++    pub fn log_directory(&self) -> &str {
++        &self.log_directory
++    }
++
+     ///
+     /// Returns the l2 flag.
+     ///
+diff --git a/src/utils/nanvixd/src/sandbox/linuxd.rs b/src/utils/nanvixd/src/sandbox/linuxd.rs
+index 6a9ec9d1..750b7717 100644
+--- a/src/utils/nanvixd/src/sandbox/linuxd.rs
++++ b/src/utils/nanvixd/src/sandbox/linuxd.rs
+@@ -131,6 +131,7 @@ impl LinuxDaemon {
+         hwloc: Option<HwLoc>,
+         binary_directory: &str,
+         toolchain_binary_directory: &str,
++        log_directory: &str,
+         control_plane_listener: &mut SocketListener,
+         control_plane_poll: &mut Poll,
+         l2: bool,
+@@ -164,6 +165,8 @@ impl LinuxDaemon {
+             vec![
+                 format!("{}/linuxd.elf", binary_directory),
+                 args::Args::OPT_LOGFILE.to_string(),
++                args::Args::OPT_LOGDIR.to_string(),
++                log_directory.to_string(),
+                 args::Args::OPT_CONTROL_PLANE_SOCKADDR.to_string(),
+                 control_plane_sockaddr.to_string(),
+                 args::Args::OPT_USER_VM_BIND_SOCKADDR.to_string(),
+diff --git a/src/utils/nanvixd/src/sandbox/microvm.rs b/src/utils/nanvixd/src/sandbox/microvm.rs
+index b6fc103b..ec3bc272 100644
+--- a/src/utils/nanvixd/src/sandbox/microvm.rs
++++ b/src/utils/nanvixd/src/sandbox/microvm.rs
+@@ -49,6 +49,7 @@ impl Microvm {
+         stderr: Option<&str>,
+         hwloc: Option<HwLoc>,
+         binary_directory: &str,
++        log_directory: &str,
+         control_plane_listener: &mut SocketListener,
+         control_plane_poll: &mut Poll,
+         l2: bool,
+@@ -56,6 +57,8 @@ impl Microvm {
+         let mut user_vm_args: Vec<String> = vec![
+             format!("{}/microvm.elf", binary_directory),
+             ::microvm::args::Args::OPT_LOGFILE.to_string(),
++            ::microvm::args::Args::OPT_LOGDIR.to_string(),
++            log_directory.to_string(),
+             ::microvm::args::Args::OPT_USER_VM_ID.to_string(),
+             id.to_string(),
+             ::microvm::args::Args::OPT_KERNEL.to_string(),
+-- 
+2.43.0
+
