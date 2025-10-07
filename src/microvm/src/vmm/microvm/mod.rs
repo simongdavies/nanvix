@@ -14,6 +14,7 @@
 mod kvm;
 mod microvm;
 mod pal;
+use syslog::info;
 
 // We need this constant in the orchestrator.
 pub use microvm::INTERRUPT_SIGNAL;
@@ -420,6 +421,7 @@ impl Vmm {
     ) -> Box<microvm::OutputFn> {
         // Output function used for emulating I/O port writes.
         let output = move |vm: &Arc<Mutex<VirtualMemory>>, data, size| -> Result<()> {
+            info!("output(): data={data:?}, size={size:?}");
             // Parse operand size do determine how to handle the operation.
             if size == 1 {
                 // Write to the standard error device.

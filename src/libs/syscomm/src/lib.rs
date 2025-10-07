@@ -41,7 +41,10 @@ use ::std::{
         Instant,
     },
 };
-use ::syslog::error;
+use ::syslog::{
+    error,
+    info,
+};
 
 //==================================================================================================
 // Constants
@@ -172,10 +175,13 @@ impl Drop for SocketListener {
     fn drop(&mut self) {
         match self {
             SocketListener::Tcp(_) => {},
-            SocketListener::Unix { listener: _, path } => match fs::remove_file(path.clone()) {
-                Ok(_) => {},
-                Err(ref e) if e.kind() == ErrorKind::NotFound => {},
-                Err(e) => error!("error removing UNIX socket (path={path}, error={e:?})"),
+            SocketListener::Unix { listener: _, path } => {
+                info!("Drop - Removing UNIX socket (path={path})");
+                match fs::remove_file(path.clone()) {
+                    Ok(_) => {},
+                    Err(ref e) if e.kind() == ErrorKind::NotFound => {},
+                    Err(e) => error!("error removing UNIX socket (path={path}, error={e:?})"),
+                }
             },
         }
     }
@@ -626,33 +632,35 @@ impl BlockingSocketStream {
     /// The number of bytes read into the buffer.
     ///
     pub fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let mut do_read = |stream: &mut dyn Read, poll: &mut Poll| -> io::Result<usize> {
+            let mut total: usize = 0;
+            let mut events: Events = Events::with_capacity(config::syscomm::MAX_NUM_POLL_EVENTS);
+
+            loop {
+                // Try to read without polling until the stream WouldBlock.
+                match stream.read(&mut buf[total..]) {
+                    Ok(0) => return Ok(total),
+                    Ok(n) => {
+                        total += n;
+                        if total == buf.len() {
+                            return Ok(total);
+                        }
+
+                        // Keep looping until we drain the stream.
+                        continue;
+                    },
+                    Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                        // If we need to block, call poll.
+                        poll.poll(&mut events, None)?;
+                    },
+                    Err(e) => return Err(e),
+                }
+            }
+        };
+
         match self {
-            BlockingSocketStream::Tcp(stream, poll) => {
-                let mut events = Events::with_capacity(config::syscomm::MAX_NUM_POLL_EVENTS);
-
-                // Even after a poll wake-up the socket may still return WouldBlock.
-                loop {
-                    poll.poll(&mut events, None)?;
-                    match stream.read(buf) {
-                        Ok(n) => return Ok(n),
-                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
-                        Err(e) => return Err(e),
-                    }
-                }
-            },
-            BlockingSocketStream::Unix(stream, poll) => {
-                let mut events = Events::with_capacity(config::syscomm::MAX_NUM_POLL_EVENTS);
-
-                // Even after a poll wake-up the socket may still return WouldBlock.
-                loop {
-                    poll.poll(&mut events, None)?;
-                    match stream.read(buf) {
-                        Ok(n) => return Ok(n),
-                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
-                        Err(e) => return Err(e),
-                    }
-                }
-            },
+            BlockingSocketStream::Tcp(stream, poll) => do_read(stream, poll),
+            BlockingSocketStream::Unix(stream, poll) => do_read(stream, poll),
         }
     }
 
@@ -672,6 +680,10 @@ impl BlockingSocketStream {
     pub fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), SocketError> {
         let mut num_read = 0;
         while num_read < buf.len() {
+            info!(
+                "BlockingSocketStream::read_exact(): about to read {} bytes",
+                buf.len() - num_read
+            );
             match self.read(&mut buf[num_read..]) {
                 Ok(0) => {
                     return Err(

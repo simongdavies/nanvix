@@ -36,6 +36,7 @@ use ::sys::ipc::Message;
 use ::syslog::{
     debug,
     error,
+    info,
 };
 
 //==================================================================================================
@@ -84,6 +85,7 @@ where
 
         // Must drain each queue when we receive a notification.
         'main_loop: loop {
+            info!("memory_thread(): waiting for events");
             poll.poll(&mut events, None)?;
 
             match control_rx.try_recv() {

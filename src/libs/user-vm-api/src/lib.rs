@@ -21,7 +21,11 @@ use ::syscomm::{
     BlockingSocketStream,
     SocketType,
 };
-use ::syslog::error;
+use ::syslog::{
+    error,
+    info,
+};
+use std::thread;
 
 //==================================================================================================
 // Types
@@ -127,8 +131,22 @@ impl NewUserVm {
 
         let len_be: [u8; size_of::<u32>()] = (payload.len() as u32).to_be_bytes();
 
+        info!(
+            "user_vm_api::NewUserVm::send(): sending length of message {} to blocking stream",
+            payload.len()
+        );
         blocking_stream.write_all(&len_be)?;
+        info!(
+            "user_vm_api::NewUserVm::send(): sending message payload of length {} to blocking \
+             stream",
+            payload.len()
+        );
+        thread::sleep(std::time::Duration::from_millis(500));
         blocking_stream.write_all(&payload)?;
+        info!(
+            "user_vm_api::NewUserVm::send(): sent message payload of length {} to blocking stream",
+            payload.len()
+        );
 
         Ok(())
     }
@@ -149,6 +167,11 @@ impl NewUserVm {
     ///
     pub fn recv(blocking_stream: &mut BlockingSocketStream) -> io::Result<Self> {
         // Read the size of the message.
+
+        info!(
+            "user_vm_api::NewUserVm::recv(): waiting to receive message size from blocking stream",
+        );
+
         let mut len_buf: [u8; size_of::<u32>()] = [0u8; size_of::<u32>()];
         blocking_stream.read_exact(&mut len_buf)?;
         let len: usize = u32::from_be_bytes(len_buf) as usize;
@@ -160,9 +183,20 @@ impl NewUserVm {
             return Err(io::Error::new(io::ErrorKind::InvalidData, reason));
         }
 
+        info!(
+            "user_vm_api::NewUserVm::recv(): about to receive message of length {len} from \
+             blocking stream",
+        );
+
         // Read the message body.
         let mut buf: Vec<u8> = vec![0u8; len];
         blocking_stream.read_exact(&mut buf)?;
+
+        info!(
+            "user_vm_api::NewUserVm::recv(): deserialized buffer of length {} received from \
+             blocking stream",
+            buf.len()
+        );
 
         let (msg, msg_len): (NewUserVm, usize) =
             bincode::decode_from_slice(&buf, config::standard()).map_err(|decode_error| {
@@ -172,6 +206,11 @@ impl NewUserVm {
                 io::Error::new(io::ErrorKind::InvalidData, reason)
             })?;
         debug_assert!(msg_len == len);
+
+        info!(
+            "user_vm_api::NewUserVm::recv(): deserialized message of length {msg_len} expected \
+             {len}  received from blocking stream",
+        );
 
         Ok(msg)
     }

@@ -145,6 +145,7 @@ use ::syscomm::{
 use ::syslog::{
     debug,
     error,
+    info,
     trace,
 };
 use libc::{
@@ -786,7 +787,7 @@ impl WorkerThreadHandle {
         source: ThreadIdentifier,
         mut request: WriteRequest,
     ) -> Result<Message, WorkerThreadError> {
-        trace!("handle_write_request(): source={source:?}, request={request:?}");
+        info!("handle_write_request(): source={source:?}, request={request:?}");
         // Check if writing to gateway.
         if request.fd == STDOUT_FILENO || request.fd == STDERR_FILENO {
             let gw_stream = if let Some(gw_stream) = gw_stream {
@@ -807,8 +808,12 @@ impl WorkerThreadHandle {
             } else {
                 profiler::timestamp_message!(&mut request.buffer, 0);
                 let count: usize = request.count as usize;
-
+                info!("About to get lock for write to gateway request {request:?}");
                 if let Ok(mut locked_gw_stream) = gw_stream.lock() {
+                    info!(
+                        "Got Lock for writing to gateway request {request:?}: {:?}",
+                        &request.buffer[..count]
+                    );
                     match locked_gw_stream.write_all(&request.buffer[..count]) {
                         Ok(()) => {},
                         Err(e) if e.kind() == ErrorKind::Interrupted => {
@@ -826,7 +831,7 @@ impl WorkerThreadHandle {
 
                 // We don't wait for the IO thread to confirm that the write was correct, as writes
                 // are fully non-blocking.
-                debug!("wrote {count} bytes to the gateway");
+                info!("wrote {count} bytes to the gateway");
                 Ok(WriteResponse::build(source, count as i32))
             }
         } else {

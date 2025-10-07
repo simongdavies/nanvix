@@ -60,7 +60,11 @@ use ::syscomm::{
     BlockingSocketStream,
     Socket,
     SocketListener,
-    SocketStream,
+    SocketStream::{
+        self,
+        Tcp,
+        Unix,
+    },
     SocketType,
 };
 use ::syslog::{
@@ -72,6 +76,11 @@ use ::syslog::{
 use ::user_vm_api::{
     self,
     RawUserVmIdentifier,
+};
+use std::{
+    io::Write,
+    path,
+    path::Path,
 };
 
 //==================================================================================================
@@ -195,6 +204,7 @@ impl LinuxDaemon {
     ) -> Result<(), Error> {
         // Accept new connection in a loop, as we have a non-blocking socket, and
         // we may have more than one connection pending to be accepted.
+        let mut sock_addr = String::new();
         loop {
             match self.user_vm_listener.accept() {
                 Ok(user_vm_stream) => {
@@ -207,6 +217,7 @@ impl LinuxDaemon {
                                 "error setting stream to blocking mode",
                             )
                         })?;
+                    info!("About to call user_vm_api::NewUserVm::recv");
                     let new_msg: user_vm_api::NewUserVm = user_vm_api::NewUserVm::recv(
                         &mut blocking_user_vm_stream,
                     )
@@ -239,6 +250,10 @@ impl LinuxDaemon {
                     // the user VM's gateway.
                     let gateway_sockaddr: String = new_msg.gateway_sockaddr().to_string();
                     let gateway_socket_type: SocketType = new_msg.gateway_socket_type();
+                    info!(
+                        "linuxd about to bind to Gateway socket (vm_id={user_vm_id}, \
+                         addr={gateway_sockaddr})"
+                    );
                     let mut gateway_listener: SocketListener =
                         match Socket::bind(gateway_socket_type, gateway_sockaddr.clone()) {
                             Ok(listener) => listener,
@@ -249,10 +264,24 @@ impl LinuxDaemon {
                                 return Err(Self::log_and_error(ErrorCode::IoErr, reason));
                             },
                         };
-                    trace!(
+                    info!(
                         "linuxd started gateway listener for user VM (vm_id={user_vm_id}, \
                          addr={gateway_sockaddr})"
                     );
+
+                    // Check that gateway_socket address exists.
+                    match path::Path::exists(Path::new(&gateway_sockaddr)) {
+                        true => {
+                            info!(
+                                "gateway socket address exists (vm_id={user_vm_id}, \
+                                 addr={gateway_sockaddr})",
+                            );
+                        },
+                        false => {
+                            let reason: &'static str = "gateway socket address does not exist";
+                            error!("{reason} (addr={gateway_sockaddr})");
+                        },
+                    }
 
                     // Accept one connection. We use an ephemeral poll, but this step will become
                     // unnecessary when we introduce support for lazily accepting a gateway
@@ -277,7 +306,7 @@ impl LinuxDaemon {
                     // Accept a connection once from nanvixd, and discard it. This lets nanvixd
                     // know, reliably, that the gateway is ready to accept connections and it can
                     // return its address to users without risk of race conditions.
-                    gateway_listener
+                    let dropped_stream = gateway_listener
                         .accept_timeout(
                             &mut gateway_poll,
                             Duration::from_secs(config::syscomm::ACCEPT_TIMEOUT_SECS),
@@ -288,7 +317,61 @@ impl LinuxDaemon {
                                 "error accepting throw-away gateway connection from nanvixd",
                             )
                         })?;
-                    trace!("linuxd accepted throw-away gateway connection from nanvixd");
+                    info!("linuxd accepted throw-away gateway connection from nanvixd");
+
+                    match &dropped_stream {
+                        Tcp(ref s) => {
+                            info!(
+                                "dropped stream is TCP (vm_id={user_vm_id}, peer_addr={:?})",
+                                s.peer_addr()
+                            );
+                        },
+                        Unix(ref s) => {
+                            info!(
+                                "dropped stream is Unix (vm_id={user_vm_id}, peer_addr={:?})",
+                                s.peer_addr()
+                            );
+                            // check if the socket file exists
+                            if let Ok(addr) = s.peer_addr() {
+                                if let Some(path) = addr.as_pathname() {
+                                    if path.exists() {
+                                        info!(
+                                            "dropped socket file exists (vm_id={user_vm_id}, \
+                                             path={:?})",
+                                            path
+                                        );
+                                    } else {
+                                        warn!(
+                                            "dropped socket file does not exist \
+                                             (vm_id={user_vm_id}, path={:?})",
+                                            path
+                                        );
+                                    }
+                                } else {
+                                    warn!("dropped socket has no pathname (vm_id={user_vm_id})");
+                                }
+                            } else {
+                                warn!(
+                                    "could not get peer address of dropped socket \
+                                     (vm_id={user_vm_id})"
+                                );
+                            }
+                        },
+                    };
+
+                    // Check that gateway_socket address exists.
+                    match path::Path::exists(Path::new(&gateway_sockaddr)) {
+                        true => {
+                            info!(
+                                "gateway socket address exists (vm_id={user_vm_id}, \
+                                 addr={gateway_sockaddr})",
+                            );
+                        },
+                        false => {
+                            let reason: &'static str = "gateway socket address does not exist";
+                            error!("{reason} (addr={gateway_sockaddr})");
+                        },
+                    }
 
                     // Now accept the real gateway connection. Once we move to lazily initialized
                     // connection, the next bit of logic will be moved elsewhere.
@@ -306,12 +389,75 @@ impl LinuxDaemon {
                             })?,
                     );
 
-                    trace!(
-                        "registered user VM handle (vm_id={user_vm_id}, gw_stream={})",
-                        gateway_stream.is_some()
+                    info!(
+                        "registered user VM handle (vm_id={user_vm_id}, gw_stream={}, connected \
+                         {})",
+                        gateway_stream.is_some(),
+                        match &gateway_stream {
+                            Some(_) => "connected",
+                            None => "not connected",
+                        }
                     );
+                    match &gateway_stream {
+                        Some(ref s) => match s {
+                            Tcp(ref s) => {
+                                info!(
+                                    "gateway stream is TCP (vm_id={user_vm_id}, peer_addr={:?})",
+                                    s.peer_addr()
+                                );
+                            },
+                            Unix(ref s) => {
+                                info!(
+                                    "gateway stream is Unix (vm_id={user_vm_id}, peer_addr={:?})",
+                                    s.peer_addr()
+                                );
+                                // check if the socket file exists
+                                if let Ok(addr) = s.peer_addr() {
+                                    if let Some(path) = addr.as_pathname() {
+                                        if path.exists() {
+                                            info!(
+                                                "gateway socket file exists (vm_id={user_vm_id}, \
+                                                 path={:?})",
+                                                path
+                                            );
+                                        } else {
+                                            warn!(
+                                                "gateway socket file does not exist \
+                                                 (vm_id={user_vm_id}, path={:?})",
+                                                path
+                                            );
+                                        }
+                                    } else {
+                                        warn!(
+                                            "gateway socket has no pathname (vm_id={user_vm_id})"
+                                        );
+                                    }
+                                } else {
+                                    warn!(
+                                        "could not get peer address of gateway socket \
+                                         (vm_id={user_vm_id})"
+                                    );
+                                }
+                            },
+                        },
+                        None => {
+                            warn!("no gateway stream (vm_id={user_vm_id})");
+                        },
+                    };
+                    info!(
+                        "About to insert user VM handle (vm_id={user_vm_id}) into \
+                         user_vm_connections"
+                    );
+                    // Insert user VM handle.
                     user_vm_connections
                         .insert(user_vm_id, UserVmHandle::new(user_vm_stream, gateway_stream));
+
+                    // [HACK] leak gateway listener to avoid closing the socket file descriptor. This is a
+                    // temporary workaround until we have a proper way to manage socket lifetimes.
+                    info!("Leaking gateway listener to avoid closing socket file descriptor");
+                    std::mem::forget(gateway_listener);
+                    info!("Leaked gateway listener to avoid closing socket file descriptor");
+                    let sock_addr = gateway_sockaddr.clone();
                 },
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     // No connections to be accepted, break.
@@ -325,6 +471,19 @@ impl LinuxDaemon {
                 },
             }
         }
+
+        // Check that gateway_socket address still exists.
+        match path::Path::exists(Path::new(&sock_addr)) {
+            true => {
+                info!("gateway socket address exists (addr={sock_addr})");
+            },
+            false => {
+                let reason: &'static str = "gateway socket address does not exist";
+                error!("{reason} (addr={sock_addr})");
+            },
+        }
+
+        info!("All user VM handles inserted into user_vm_connections");
 
         Ok(())
     }

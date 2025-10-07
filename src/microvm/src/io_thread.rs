@@ -46,6 +46,7 @@ use ::syslog::{
     debug,
     error,
 };
+use syslog::info;
 
 //==================================================================================================
 // Constants
@@ -234,6 +235,7 @@ impl IoThread {
         let mut events: Events = Events::with_capacity(config::syscomm::MAX_NUM_POLL_EVENTS);
 
         loop {
+            info!("IoThread: waiting for events");
             self.poll.poll(&mut events, None)?;
 
             // We must drain each socket/queue until they return WouldBlock in order to not miss
@@ -255,10 +257,26 @@ impl IoThread {
                         // Try to receive from the data-plane.
                         while self.try_receive_from_microvm()? != Break(()) {}
 
-                        // FIXME (#1025): merge try_receive_from_microvm and try_send_to_system_vm
+                        // Line 261-263 - Add logging
+                        let start_len = self.outgoing.len();
+                        info!("WAKER_TOKEN: starting to drain outgoing queue (len={})", start_len);
+                        let mut iterations = 0;
                         while !self.outgoing.is_empty() {
                             self.try_send_to_system_vm()?;
+                            iterations += 1;
+                            if iterations % 1000 == 0 {
+                                info!(
+                                    "WAKER_TOKEN: still draining... (iterations={}, queue_len={})",
+                                    iterations,
+                                    self.outgoing.len()
+                                );
+                            }
                         }
+                        info!(
+                            "WAKER_TOKEN: finished draining (iterations={}, final_len={})",
+                            iterations,
+                            self.outgoing.len()
+                        );
                     },
 
                     SYSTEM_VM_TOKEN => {
@@ -427,6 +445,10 @@ impl IoThread {
                     match system_vm_stream.write_all(&message_clone.to_bytes()) {
                         Ok(()) => Ok(()),
                         Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                            info!(
+                                "try_send_to_system_vm(): system VM socket would block, \
+                                 re-queuing message",
+                            );
                             self.outgoing.push_front(message);
                             Ok(())
                         },

@@ -190,7 +190,9 @@ impl Vmm {
         let file_writer = Self::get_stderr_writer(stderr.clone())?;
 
         let writer_fn = move |s: String| -> Result<i32, HyperlightError> {
+            info!("About to get lock for write to stderr: {}", s);
             let mut file_writer = file_writer.lock().unwrap();
+            info!("Writing to stderr: {}", s);
             file_writer.write_all(s.as_bytes())?;
             Ok(s.len() as i32)
         };
@@ -292,15 +294,20 @@ impl Vmm {
                 },
             };
 
+            info!("About to send message: {:?}", message);
+
             if let Err(e) = vcpu_thread_stdout_tx.send(message) {
                 let reason: String = format!("failed to send message: {:?}", e);
                 error!("output(): {}", reason);
                 return Err(HyperlightError::AnyhowError(anyhow::Error::msg(reason)));
             }
 
+            info!("Message sent -waking I/O thread");
+
             if let Some(io_thread_waker) = &io_thread_waker_clone {
                 io_thread_waker.wake()?;
             }
+            info!("I/O thread woken");
 
             Ok(data.len() as i32)
         })?;
