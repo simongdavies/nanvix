@@ -32,7 +32,7 @@ REPO_ROOT_DIR=$(git rev-parse --show-toplevel)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" 
 
 # Default branch name.
-DEFAULT_BRANCH_NAME=$(git -C "${REPO_ROOT_DIR}" remote show origin | awk '/HEAD branch/ {print $NF}')
+#DEFAULT_BRANCH_NAME=$(git -C "${REPO_ROOT_DIR}" remote show origin | awk '/HEAD branch/ {print $NF}')
 
 # Latest commit hash made to the default branch.
 # NANVIX_VERSION=$(git -C "${REPO_ROOT_DIR}" rev-parse origin/${DEFAULT_BRANCH_NAME})
